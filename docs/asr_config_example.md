@@ -131,12 +131,42 @@
 
 ## 输出格式
 
+### ASR 片段格式
 ASR 返回的每个片段包含：
 - `begin_sec`: 开始时间（秒）
 - `end_sec`: 结束时间（秒）
 - `text`: 转写文本
 - `spk`: 说话人序号（启用说话人分离时）
 - `confidence`: 置信度（可选）
+
+### 文档字段结构
+每个视频帧生成的文档包含以下字段：
+
+**基础字段**：
+- `video_timestamp`: 帧时间戳（秒）
+- `frame_index`: 帧序号
+- `is_video_frame`: 是否为视频帧（true）
+- `video_filename`: 视频文件名
+- `video_duration`: 视频总时长（秒）
+- `video_fps`: 视频帧率
+- `frame_image_path`: 帧图片在 MinIO 的路径
+- `frame_image_base64`: 帧图片的 base64 编码
+
+**内容字段**（分开存储）：
+- `asr_text`: 语音转写文本（包含说话人标注，如 `[说话人0] 大家好`）
+- `visual_text`: 视觉内容文本（OCR + VLM 融合）
+- `content_ltks`: 用于检索的分词结果（基于 `asr_text` + `visual_text` 融合）
+
+**前端展示建议**：
+```javascript
+// 分别展示语音和视觉内容
+{
+  timestamp: doc.video_timestamp,
+  audio: doc.asr_text,        // 语音内容区域
+  visual: doc.visual_text,    // 视觉内容区域
+  image: doc.frame_image_base64
+}
+```
 
 ## 故障排查
 

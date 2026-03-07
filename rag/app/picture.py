@@ -33,7 +33,6 @@ from common.string_utils import clean_markdown_block
 from deepdoc.vision import OCR
 from rag.nlp import attach_media_context, rag_tokenizer, tokenize
 from rag.utils.asr_client import ASRClient
-from rag.utils.minio_conn import RAGFlowMinio
 
 ocr = OCR()
 
@@ -207,7 +206,13 @@ def _process_video_simple(filename, binary, tenant_id, lang, callback):
 
 
 def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_config):
-    """高级视频处理方案：抽帧 + ASR + OCR + VLM（新设计方案）"""
+    """高级视频处理方案：抽帧 + ASR + OCR + VLM
+
+    生成两类独立的chunk记录：
+    - video_frame: 每帧一条，包含图片 + OCR/VLM文本
+    - video_asr: 每个ASR分段一条，包含时间段 + 转写文本
+    通过 doc_id 关联到同一个视频。
+    """
     doc = {
         "docnm_kwd": filename,
         "title_tks": rag_tokenizer.tokenize(re.sub(r"\.[a-zA-Z]+$", "", filename)),
@@ -218,13 +223,14 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
     frame_interval = parser_config.get('frame_interval', 1.0)
     use_keyframe = parser_config.get('use_keyframe', False)
     enable_asr = parser_config.get('enable_asr', True)
-    enable_ocr = parser_config.get('enable_ocr', True)
-    enable_vlm = parser_config.get('enable_vlm', False)
-    asr_type = parser_config.get('asr_type', 'whisper')  # 'whisper' 或 'tuling'
+    enable_ocr = parser_config.get('enable_ocr', False)
+    enable_vlm = parser_config.get('enable_vlm', True)
+    asr_type = parser_config.get('asr_type', 'whisper')
     asr_api_url = parser_config.get('asr_api_url', '')
-    asr_language = parser_config.get('asr_language', 'auto')  # Whisper语言代码
+    asr_language = parser_config.get('asr_language', 'auto')
     speaker_separation = parser_config.get('speaker_separation', False)
 
+    eng = lang.lower() == "english"
     video_path = None
     audio_path = None
     chunks = []
@@ -253,8 +259,7 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
 
         callback(0.3, f"提取了 {len(frames)} 个视频帧")
 
-        # ASR转写
-        asr_segments = []
+        # ========== ASR转写 → 生成 video_asr 类型的 chunk ==========
         if enable_asr:
             callback(0.4, "开始音频转写...")
 
@@ -281,22 +286,39 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
 
                     if asr_segments:
                         preview = asr_segments[0].get('text', '')[:50]
-                        callback(0.6, f"音频转写完成({len(asr_segments)}段): {preview}...")
+                        callback(0.5, f"音频转写完成({len(asr_segments)}段): {preview}...")
+
+                        # 每个ASR分段生成一条独立的chunk
+                        for seg_idx, seg in enumerate(asr_segments):
+                            asr_doc = doc.copy()
+                            asr_doc['doc_type_kwd'] = 'video_asr'
+                            asr_doc['video_filename'] = filename
+                            asr_doc['video_duration'] = video_duration
+                            asr_doc['asr_begin_sec'] = seg.get('begin_sec', 0.0)
+                            asr_doc['asr_end_sec'] = seg.get('end_sec', 0.0)
+                            asr_doc['asr_segment_index'] = seg_idx
+
+                            text = seg.get('text', '')
+                            spk = seg.get('spk')
+                            if spk is not None:
+                                asr_doc['asr_speaker'] = spk
+                                text = f"[说话人{spk}] {text}"
+
+                            if text:
+                                tokenize(asr_doc, text, eng)
+                                chunks.append(asr_doc)
                     else:
-                        callback(0.6, "音频转写完成，未识别到语音内容")
+                        callback(0.5, "音频转写完成，未识别到语音内容")
 
                 except Exception as e:
                     logging.error(f"ASR failed: {e}")
-                    callback(0.6, f"音频转写失败: {str(e)}")
+                    callback(0.5, f"音频转写失败: {str(e)}")
             else:
-                callback(0.6, "音频提取失败，跳过ASR转写")
+                callback(0.5, "音频提取失败，跳过ASR转写")
 
-        # 对齐ASR文本到帧
-        frame_timestamps = [ts for ts, _ in frames]
-        aligned_texts = align_asr_to_frames(asr_segments, frame_timestamps, frame_interval) if asr_segments else {}
+        callback(0.6, "开始处理视频帧...")
 
-        callback(0.7, "开始处理视频帧...")
-
+        # ========== 帧处理 → 生成 video_frame 类型的 chunk ==========
         # 预先初始化OCR引擎
         ocr_engine = None
         if enable_ocr:
@@ -314,20 +336,15 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
             except Exception as e:
                 logging.error(f"Failed to initialize VLM model: {e}")
 
-        # 处理每一帧
         for idx, (timestamp, frame_image) in enumerate(frames):
             frame_doc = doc.copy()
-
-            # 添加视频特有字段
+            frame_doc['doc_type_kwd'] = 'video_frame'
             frame_doc['video_timestamp'] = timestamp
             frame_doc['frame_index'] = idx
-            frame_doc['is_video_frame'] = True
             frame_doc['video_filename'] = filename
             frame_doc['video_duration'] = video_duration
             frame_doc['video_fps'] = video_fps
-
-            # 获取对齐的ASR文本
-            asr_text = aligned_texts.get(timestamp, '')
+            frame_doc['image'] = frame_image
 
             # OCR处理
             ocr_text = ''
@@ -346,40 +363,16 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
                 except Exception as e:
                     logging.error(f"VLM failed for frame {idx}: {e}")
 
-            # 融合多模态内容
-            combined_text = '\n'.join(filter(None, [asr_text, ocr_text, vlm_text]))
+            # 视觉内容
+            visual_text = '\n'.join(filter(None, [ocr_text, vlm_text]))
 
-            if combined_text:
-                is_english = lang.lower() == "english"
-                tokenize(frame_doc, combined_text, is_english)
-
-                # 存储帧图片到MinIO
-                try:
-                    minio_client = RAGFlowMinio()
-
-                    img_buffer = io.BytesIO()
-                    frame_image.save(img_buffer, format='JPEG', quality=85)
-                    img_bytes = img_buffer.getvalue()
-
-                    filename_base = os.path.splitext(filename)[0]
-                    frame_filename = f"videos/{tenant_id}/{filename_base}/frame_{idx}_{timestamp:.2f}.jpg"
-
-                    minio_client.put(
-                        bucket=tenant_id,
-                        fnm=frame_filename,
-                        binary=img_bytes,
-                        tenant_id=tenant_id
-                    )
-
-                    frame_doc['frame_image_path'] = frame_filename
-                    frame_doc['frame_image_base64'] = base64.b64encode(img_bytes).decode('utf-8')
-
-                except Exception as e:
-                    logging.error(f"Failed to upload frame {idx} to MinIO: {e}")
-
+            if visual_text:
+                tokenize(frame_doc, visual_text, eng)
                 chunks.append(frame_doc)
 
-        callback(1.0, f"视频处理完成,生成 {len(chunks)} 个chunks")
+            callback(0.6 + 0.3 * (idx + 1) / len(frames), f"处理帧 {idx + 1}/{len(frames)}")
+
+        callback(1.0, f"视频处理完成，生成 {len(chunks)} 条记录")
         return chunks
 
     except Exception as e:
