@@ -32,7 +32,7 @@ from common.constants import LLMType
 from common.string_utils import clean_markdown_block
 from deepdoc.vision import OCR
 from rag.nlp import attach_media_context, rag_tokenizer, tokenize
-from rag.utils.asr_client import TulingASRClient
+from rag.utils.asr_client import ASRClient
 from rag.utils.minio_conn import RAGFlowMinio
 
 ocr = OCR()
@@ -220,7 +220,9 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
     enable_asr = parser_config.get('enable_asr', True)
     enable_ocr = parser_config.get('enable_ocr', True)
     enable_vlm = parser_config.get('enable_vlm', False)
+    asr_type = parser_config.get('asr_type', 'whisper')  # 'whisper' 或 'tuling'
     asr_api_url = parser_config.get('asr_api_url', '')
+    asr_language = parser_config.get('asr_language', 'auto')  # Whisper语言代码
     speaker_separation = parser_config.get('speaker_separation', False)
 
     video_path = None
@@ -253,52 +255,41 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
 
         # ASR转写
         asr_segments = []
-        audio_minio_path = None
         if enable_asr:
             callback(0.4, "开始音频转写...")
 
             audio_path = video_path.replace(ext, '.wav')
             if extract_audio_from_video(video_path, audio_path):
-                # 上传音频到MinIO，获取HTTP可访问URI
-                audio_uri = None
                 try:
+                    # 读取音频字节数组
                     with open(audio_path, 'rb') as f:
                         audio_bytes = f.read()
 
-                    minio_client = RAGFlowMinio()
-                    filename_base = os.path.splitext(filename)[0]
-                    audio_filename = f"videos/{tenant_id}/{filename_base}/audio.wav"
-
-                    minio_client.put(
-                        bucket=tenant_id,
-                        fnm=audio_filename,
-                        binary=audio_bytes,
-                        tenant_id=tenant_id
+                    # 初始化ASR客户端
+                    asr_client = ASRClient(
+                        asr_type=asr_type,
+                        api_url=asr_api_url if asr_api_url else None,
+                        timeout=300
                     )
-                    audio_minio_path = audio_filename
-                    audio_uri = minio_client.get_presigned_url(tenant_id, audio_filename, 3600)
-                    logging.info(f"Audio uploaded to MinIO: {audio_filename}")
-                except Exception as e:
-                    logging.error(f"Failed to upload audio to MinIO: {e}")
 
-                # 调用图灵ASR进行转写
-                if audio_uri:
-                    try:
-                        asr_client = TulingASRClient(api_url=asr_api_url) if asr_api_url else TulingASRClient()
-                        asr_segments = asr_client.transcribe(
-                            audio_uri=audio_uri,
-                            speaker_separation=speaker_separation,
-                        )
-                        if asr_segments:
-                            preview = asr_segments[0].get('text', '')[:50]
-                            callback(0.6, f"音频转写完成({len(asr_segments)}段): {preview}...")
-                        else:
-                            callback(0.6, "音频转写完成，未识别到语音内容")
-                    except Exception as e:
-                        logging.error(f"Tuling ASR failed: {e}")
-                        callback(0.6, f"音频转写失败: {str(e)}")
-                else:
-                    callback(0.6, "音频上传失败，跳过ASR转写")
+                    # 调用ASR转写
+                    asr_segments = asr_client.transcribe(
+                        audio_bytes=audio_bytes,
+                        speaker_separation=speaker_separation,
+                        language=asr_language,
+                    )
+
+                    if asr_segments:
+                        preview = asr_segments[0].get('text', '')[:50]
+                        callback(0.6, f"音频转写完成({len(asr_segments)}段): {preview}...")
+                    else:
+                        callback(0.6, "音频转写完成，未识别到语音内容")
+
+                except Exception as e:
+                    logging.error(f"ASR failed: {e}")
+                    callback(0.6, f"音频转写失败: {str(e)}")
+            else:
+                callback(0.6, "音频提取失败，跳过ASR转写")
 
         # 对齐ASR文本到帧
         frame_timestamps = [ts for ts, _ in frames]
@@ -334,9 +325,6 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
             frame_doc['video_filename'] = filename
             frame_doc['video_duration'] = video_duration
             frame_doc['video_fps'] = video_fps
-
-            if audio_minio_path:
-                frame_doc['audio_path'] = audio_minio_path
 
             # 获取对齐的ASR文本
             asr_text = aligned_texts.get(timestamp, '')
