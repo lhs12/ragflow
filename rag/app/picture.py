@@ -357,9 +357,10 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
 
             # VLM处理
             vlm_text = ''
+            prompt="请提取这张图片中的字幕文字和画面内容描述,总字数控制在100字以内。"
             if vision_model:
                 try:
-                    vlm_text = vision_llm_chunk(frame_image, vision_model, callback=callback)
+                    vlm_text = vision_llm_chunk(frame_image, vision_model, prompt, callback=callback)
                 except Exception as e:
                     logging.error(f"VLM failed for frame {idx}: {e}")
 
@@ -370,7 +371,8 @@ def _process_video_advanced(filename, binary, tenant_id, lang, callback, parser_
                 tokenize(frame_doc, visual_text, eng)
                 chunks.append(frame_doc)
 
-            callback(0.6 + 0.3 * (idx + 1) / len(frames), f"处理帧 {idx + 1}/{len(frames)}")
+            # 将进度和消息合并成一个字符串
+            logging.info(f"处理帧 {idx + 1}/{len(frames)}，进度: {0.6 + 0.3 * (idx + 1) / len(frames):.2%}")
 
         callback(1.0, f"视频处理完成，生成 {len(chunks)} 条记录")
         return chunks

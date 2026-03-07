@@ -25,7 +25,7 @@ DEFAULT_TULING_FRAME_RATE = 100.0
 
 # 默认ASR服务地址
 DEFAULT_TULING_ASR_URL = "http://112.39.27.207:8900/tuling/asr/v3/process"
-DEFAULT_WHISPER_ASR_URL = "http://0.0.0.0:9000/asr"
+DEFAULT_WHISPER_ASR_URL = "http://172.31.169.57:9001/asr"
 
 
 class ASRClient:

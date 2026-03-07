@@ -303,8 +303,16 @@ async def build_chunks(task, progress_callback):
         try:
             d = copy.deepcopy(document)
             d.update(chunk)
-            d["id"] = xxhash.xxh64(
-                (chunk["content_with_weight"] + str(d["doc_id"])).encode("utf-8", "surrogatepass")).hexdigest()
+            # 生成唯一ID：包含 doc_type_kwd 和序号信息避免ID冲突
+            id_seed = chunk["content_with_weight"] + str(d["doc_id"])
+            if d.get("doc_type_kwd"):
+                id_seed = d["doc_type_kwd"] + ":" + id_seed
+            # 视频帧用 frame_index，ASR分段用 asr_segment_index 保证同类型内容相同时也不冲突
+            if d.get("frame_index") is not None:
+                id_seed += f":frame_{d['frame_index']}"
+            if d.get("asr_segment_index") is not None:
+                id_seed += f":asr_{d['asr_segment_index']}"
+            d["id"] = xxhash.xxh64(id_seed.encode("utf-8", "surrogatepass")).hexdigest()
             d["create_time"] = str(datetime.now()).replace("T", " ")[:19]
             d["create_timestamp_flt"] = datetime.now().timestamp()
 
