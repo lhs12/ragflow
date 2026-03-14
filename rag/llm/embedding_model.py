@@ -109,26 +109,30 @@ class OpenAIEmbed(Base):
         if not hasattr(self, 'supports_multimodal'):
             self.supports_multimodal = "qwen3-vl-embedding" in self.model_name.lower()
 
-        # If model supports multimodal and input contains bytes, use multimodal format
+        # If model supports multimodal and input contains bytes, use messages format
         has_bytes = any(isinstance(t, bytes) for t in texts)
         if self.supports_multimodal and has_bytes:
-            inputs = []
             for item in texts:
                 if isinstance(item, bytes):
                     img_b64 = base64.b64encode(item).decode("utf-8")
-                    inputs.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}})
+                    content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]
                 else:
-                    inputs.append({"type": "text", "text": truncate(str(item), 8191)})
+                    content = [{"type": "text", "text": truncate(str(item), 8191)}]
 
-            for i in range(0, len(inputs), batch_size):
-                batch = inputs[i: i + batch_size]
-                res = self.client.embeddings.create(
-                    input=batch, model=self.model_name, encoding_format="float",
-                    extra_body={"drop_params": True},
-                )
+                payload = {
+                    "model": self.model_name,
+                    "messages": [{"role": "user", "content": content}],
+                    "encoding_format": "float",
+                }
+                base_url = str(self.client.base_url).rstrip("/")
+                url = f"{base_url}/embeddings"
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.client.api_key}"}
+                response = requests.post(url, headers=headers, json=payload, timeout=120)
+                response.raise_for_status()
+                res = response.json()
                 try:
-                    ress.extend([d.embedding for d in res.data])
-                    total_tokens += total_token_count_from_response(res)
+                    ress.append(res["data"][0]["embedding"])
+                    total_tokens += res.get("usage", {}).get("total_tokens", 0)
                 except Exception as _e:
                     log_exception(_e, res)
                     raise Exception(f"Error: {res}")
