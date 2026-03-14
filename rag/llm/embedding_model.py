@@ -993,6 +993,7 @@ class GPUStackEmbed(OpenAIEmbed):
 
         self.client = OpenAI(api_key=key, base_url=base_url)
         self.model_name = model_name
+        self.supports_multimodal = "qwen3-vl-embedding" in model_name.lower()
 
 
 class NovitaEmbed(SILICONFLOWEmbed):

@@ -387,6 +387,7 @@ class LLM4Tenant:
 
         self.is_tools = model_config.get("is_tools", False)
         self.verbose_tool_use = kwargs.get("verbose_tool_use")
+        self.supports_multimodal = getattr(self.mdl, "supports_multimodal", False)
 
         langfuse_keys = TenantLangfuseService.filter_by_tenant(tenant_id=tenant_id)
         self.langfuse = None
