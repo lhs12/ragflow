@@ -49,14 +49,14 @@ class Dealer:
         keywords: list[str] | None = None
         group_docs: list[list] | None = None
 
-    async def get_vector(self, txt, emb_mdl, topk=10, similarity=0.1):
+    async def get_vector(self, txt, emb_mdl, topk=10, similarity=0.1, vector_column_prefix="q"):
         qv, _ = await thread_pool_exec(emb_mdl.encode_queries, txt)
         shape = np.array(qv).shape
         if len(shape) > 1:
             raise Exception(
                 f"Dealer.get_vector returned array's shape {shape} doesn't match expectation(exact one dimension).")
         embedding_data = [get_float(v) for v in qv]
-        vector_column_name = f"q_{len(embedding_data)}_vec"
+        vector_column_name = f"{vector_column_prefix}_{len(embedding_data)}_vec"
         return MatchDenseExpr(vector_column_name, embedding_data, 'float', 'cosine', topk, {"similarity": similarity})
 
     def get_filters(self, req):
@@ -75,7 +75,7 @@ class Dealer:
                kb_ids: list[str],
                emb_mdl=None,
                highlight: bool | list | None = None,
-               rank_feature: dict | None = None
+               rank_feature: dict | None = None,
                ):
         if highlight is None:
             highlight = False
@@ -124,8 +124,19 @@ class Dealer:
                 if not settings.DOC_ENGINE_INFINITY:
                     src.append(f"q_{len(q_vec)}_vec")
 
-                fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.05,0.95"})
-                matchExprs = [matchText, matchDense, fusionExpr]
+                # Build match expressions with optional image vector if model supports multimodal
+                supports_multimodal = getattr(emb_mdl, "supports_multimodal", False)
+                if supports_multimodal:
+                    matchDenseImg = await self.get_vector(qst, emb_mdl, topk, req.get("similarity", 0.1), vector_column_prefix="img_q")
+                    if not settings.DOC_ENGINE_INFINITY:
+                        src.append(matchDenseImg.vector_column_name)
+                    img_vec_weight = float(req.get("img_vec_weight", 0.25))
+                    text_vec_weight = 0.95 - img_vec_weight
+                    fusionExpr = FusionExpr("weighted_sum", topk, {"weights": f"0.05,{text_vec_weight},{img_vec_weight}"})
+                    matchExprs = [matchText, matchDense, matchDenseImg, fusionExpr]
+                else:
+                    fusionExpr = FusionExpr("weighted_sum", topk, {"weights": "0.05,0.95"})
+                    matchExprs = [matchText, matchDense, fusionExpr]
 
                 res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs, orderBy, offset, limit,
                                             idx_names, kb_ids, rank_feature=rank_feature)
@@ -140,7 +151,7 @@ class Dealer:
                     else:
                         matchText, _ = self.qryr.question(qst, min_match=0.1)
                         matchDense.extra_options["similarity"] = 0.17
-                        res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, [matchText, matchDense, fusionExpr],
+                        res = await thread_pool_exec(self.dataStore.search, src, highlightFields, filters, matchExprs,
                                                     orderBy, offset, limit, idx_names, kb_ids,
                                                     rank_feature=rank_feature)
                         total = self.dataStore.get_total(res)

@@ -626,6 +626,53 @@ async def embedding(docs, mdl, parser_config=None, callback=None):
         v = vects[i].tolist()
         vector_size = len(v)
         d["q_%d_vec" % len(v)] = v
+
+    # Image embedding for video_frame chunks if model supports multimodal
+    supports_multimodal = getattr(mdl, "supports_multimodal", False)
+    if supports_multimodal:
+        frame_indices = [i for i, d in enumerate(docs) if d.get("doc_type_kwd") == "video_frame" and d.get("img_id")]
+        if frame_indices:
+            callback(msg=f"Start to embed {len(frame_indices)} video frame images ...")
+
+            async def _fetch_image_bytes(img_id):
+                arr = img_id.split("-")
+                if len(arr) != 2:
+                    return None
+                bkt, nm = arr
+                try:
+                    async with minio_limiter:
+                        blob = await thread_pool_exec(settings.STORAGE_IMPL.get, bkt, nm)
+                    return blob
+                except Exception as e:
+                    logging.warning(f"Failed to fetch image {img_id}: {e}")
+                    return None
+
+            # Fetch images from MinIO concurrently
+            fetch_tasks = [_fetch_image_bytes(docs[i]["img_id"]) for i in frame_indices]
+            image_blobs = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+            # Filter valid images and their indices
+            valid = [(idx, blob) for idx, blob in zip(frame_indices, image_blobs)
+                     if isinstance(blob, bytes) and blob]
+
+            if valid:
+                @timeout(120)
+                def batch_encode_images(imgs):
+                    return mdl.encode(imgs)
+
+                img_batch_size = settings.EMBEDDING_BATCH_SIZE
+                for b in range(0, len(valid), img_batch_size):
+                    batch = valid[b: b + img_batch_size]
+                    batch_bytes = [blob for _, blob in batch]
+                    async with embed_limiter:
+                        img_vts, img_tc = await thread_pool_exec(batch_encode_images, batch_bytes)
+                    tk_count += img_tc
+                    for j, (doc_idx, _) in enumerate(batch):
+                        iv = img_vts[j].tolist()
+                        docs[doc_idx]["img_q_%d_vec" % len(iv)] = iv
+
+                callback(msg=f"Image embedding {len(valid)} frames done")
+
     return tk_count, vector_size
 
 
@@ -1123,6 +1170,7 @@ async def do_handle_task(task):
             return
         progress_callback(msg="Generate {} chunks".format(len(chunks)))
         start_ts = timer()
+
         try:
             token_count, vector_size = await embedding(chunks, embedding_model, task_parser_config, progress_callback)
         except TaskCanceledException:

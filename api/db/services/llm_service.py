@@ -98,6 +98,9 @@ class LLMBundle(LLM4Tenant):
 
         safe_texts = []
         for text in texts:
+            if isinstance(text, bytes):
+                safe_texts.append(text)
+                continue
             token_size = num_tokens_from_string(text)
             if token_size > self.max_length:
                 target_len = int(self.max_length * 0.95)

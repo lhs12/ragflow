@@ -17,8 +17,9 @@
 import re
 import json
 import copy
-from infinity.common import InfinityException, SortType
+from infinity.common import InfinityException, SortType, ConflictType
 from infinity.errors import ErrorCode
+from infinity.index import IndexInfo, IndexType
 from common.decorator import singleton
 import pandas as pd
 from common.constants import PAGERANK_FLD, TAG_FLD
@@ -349,11 +350,28 @@ class InfinityConnection(InfinityConnectionBase):
         # embedding fields can't have a default value....
         embedding_clmns = []
         clmns = table_instance.show_columns().rows()
+        existing_col_names = set()
         for n, ty, _, _ in clmns:
+            existing_col_names.add(n)
             r = re.search(r"Embedding\([a-z]+,([0-9]+)\)", ty)
             if not r:
                 continue
             embedding_clmns.append((n, int(r.group(1))))
+
+        # Dynamically add image vector columns if present in documents but not in table
+        img_vec_patt = re.compile(r"img_q_(?P<vector_size>\d+)_vec")
+        for k in documents[0].keys():
+            m = img_vec_patt.match(k)
+            if m and k not in existing_col_names:
+                vs = int(m.group("vector_size"))
+                table_instance.add_columns({k: {"type": f"vector,{vs},float"}})
+                table_instance.create_index(
+                    f"img_vec_idx_{vs}",
+                    IndexInfo(k, IndexType.Hnsw, {"M": "16", "ef_construction": "50", "metric": "cosine", "encode": "lvq"}),
+                    ConflictType.Ignore,
+                )
+                embedding_clmns.append((k, vs))
+                self.logger.info(f"INFINITY dynamically added image vector column {k} to {table_name}")
 
         docs = copy.deepcopy(documents)
         for d in docs:

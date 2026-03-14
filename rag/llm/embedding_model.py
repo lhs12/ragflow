@@ -96,21 +96,49 @@ class OpenAIEmbed(Base):
             base_url = "https://api.openai.com/v1"
         self.client = OpenAI(api_key=key, base_url=base_url)
         self.model_name = model_name
+        # Check if model supports multimodal (image + text) based on model name
+        self.supports_multimodal = "qwen3-vl-embedding" in model_name.lower()
 
     def encode(self, texts: list):
         # OpenAI requires batch size <=16
         batch_size = 16
-        texts = [truncate(t, 8191) for t in texts]
         ress = []
         total_tokens = 0
-        for i in range(0, len(texts), batch_size):
-            res = self.client.embeddings.create(input=texts[i : i + batch_size], model=self.model_name, encoding_format="float", extra_body={"drop_params": True})
-            try:
-                ress.extend([d.embedding for d in res.data])
-                total_tokens += total_token_count_from_response(res)
-            except Exception as _e:
-                log_exception(_e, res)
-                raise Exception(f"Error: {res}")
+
+        # If model supports multimodal and input contains bytes, use multimodal format
+        has_bytes = any(isinstance(t, bytes) for t in texts)
+        if self.supports_multimodal and has_bytes:
+            inputs = []
+            for item in texts:
+                if isinstance(item, bytes):
+                    img_b64 = base64.b64encode(item).decode("utf-8")
+                    inputs.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}})
+                else:
+                    inputs.append({"type": "text", "text": truncate(str(item), 8191)})
+
+            for i in range(0, len(inputs), batch_size):
+                batch = inputs[i: i + batch_size]
+                res = self.client.embeddings.create(
+                    input=batch, model=self.model_name, encoding_format="float",
+                    extra_body={"drop_params": True},
+                )
+                try:
+                    ress.extend([d.embedding for d in res.data])
+                    total_tokens += total_token_count_from_response(res)
+                except Exception as _e:
+                    log_exception(_e, res)
+                    raise Exception(f"Error: {res}")
+        else:
+            # Standard text-only encoding
+            texts = [truncate(t, 8191) for t in texts]
+            for i in range(0, len(texts), batch_size):
+                res = self.client.embeddings.create(input=texts[i : i + batch_size], model=self.model_name, encoding_format="float", extra_body={"drop_params": True})
+                try:
+                    ress.extend([d.embedding for d in res.data])
+                    total_tokens += total_token_count_from_response(res)
+                except Exception as _e:
+                    log_exception(_e, res)
+                    raise Exception(f"Error: {res}")
         return np.array(ress), total_tokens
 
     def encode_queries(self, text):
