@@ -105,6 +105,10 @@ class OpenAIEmbed(Base):
         ress = []
         total_tokens = 0
 
+        # Check if model supports multimodal (lazy initialization for subclasses)
+        if not hasattr(self, 'supports_multimodal'):
+            self.supports_multimodal = "qwen3-vl-embedding" in self.model_name.lower()
+
         # If model supports multimodal and input contains bytes, use multimodal format
         has_bytes = any(isinstance(t, bytes) for t in texts)
         if self.supports_multimodal and has_bytes:
