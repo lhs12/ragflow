@@ -85,6 +85,11 @@ class ESConnection(ESConnectionBase):
                 # Sum all vector weights (everything except the first text weight)
                 vector_similarity_weight = sum(get_float(w) for w in weights[1:])
 
+        # Save a copy of the filter-only bool_query (without query_string) for KNN filters.
+        # KNN filter should only contain structural conditions (kb_id, available_int, etc.),
+        # not text matching constraints which can eliminate valid candidates in image search.
+        knn_filter_query = copy.deepcopy(bool_query)
+
         # Collect all knn clauses for multi-vector support
         knn_clauses = []
         for m in match_expressions:
@@ -108,7 +113,7 @@ class ESConnection(ESConnectionBase):
                     "query_vector": list(m.embedding_data),
                     "k": m.topn,
                     "num_candidates": m.topn * 2,
-                    "filter": bool_query.to_dict(),
+                    "filter": knn_filter_query.to_dict(),
                     "similarity": similarity,
                 })
 
