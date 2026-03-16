@@ -84,6 +84,9 @@ class ESConnection(ESConnectionBase):
                 weights = m.fusion_params["weights"].split(",")
                 # Sum all vector weights (everything except the first text weight)
                 vector_similarity_weight = sum(get_float(w) for w in weights[1:])
+
+        # Collect all knn clauses for multi-vector support
+        knn_clauses = []
         for m in match_expressions:
             if isinstance(m, MatchTextExpr):
                 minimum_should_match = m.extra_options.get("minimum_should_match", 0.0)
@@ -100,13 +103,14 @@ class ESConnection(ESConnectionBase):
                 similarity = 0.0
                 if "similarity" in m.extra_options:
                     similarity = m.extra_options["similarity"]
-                s = s.knn(m.vector_column_name,
-                          m.topn,
-                          m.topn * 2,
-                          query_vector=list(m.embedding_data),
-                          filter=bool_query.to_dict(),
-                          similarity=similarity,
-                          )
+                knn_clauses.append({
+                    "field": m.vector_column_name,
+                    "query_vector": list(m.embedding_data),
+                    "k": m.topn,
+                    "num_candidates": m.topn * 2,
+                    "filter": bool_query.to_dict(),
+                    "similarity": similarity,
+                })
 
         if bool_query and rank_feature:
             for fld, sc in rank_feature.items():
@@ -139,6 +143,14 @@ class ESConnection(ESConnectionBase):
         if limit > 0:
             s = s[offset:offset + limit]
         q = s.to_dict()
+
+        # Inject knn clauses into query dict (supports multiple knn for multi-vector search)
+        if knn_clauses:
+            if len(knn_clauses) == 1:
+                q["knn"] = knn_clauses[0]
+            else:
+                q["knn"] = knn_clauses
+
         self.logger.debug(f"ESConnection.search {str(index_names)} query: " + json.dumps(q))
 
         for i in range(ATTEMPT_TIME):
