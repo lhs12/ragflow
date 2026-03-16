@@ -59,6 +59,13 @@ class Dealer:
         vector_column_name = f"{vector_column_prefix}_{len(embedding_data)}_vec"
         return MatchDenseExpr(vector_column_name, embedding_data, 'float', 'cosine', topk, {"similarity": similarity})
 
+    async def get_image_vector(self, image_bytes, emb_mdl, topk=10, similarity=0.1):
+        """Generate image vector from image bytes using multimodal embedding model."""
+        qv, _ = await thread_pool_exec(emb_mdl.encode, [image_bytes])
+        embedding_data = [get_float(v) for v in qv[0]]
+        vector_column_name = f"img_q_{len(embedding_data)}_vec"
+        return MatchDenseExpr(vector_column_name, embedding_data, 'float', 'cosine', topk, {"similarity": similarity})
+
     def get_filters(self, req):
         condition = dict()
         for key, field in {"kb_ids": "kb_id", "doc_ids": "doc_id"}.items():
@@ -76,6 +83,7 @@ class Dealer:
                emb_mdl=None,
                highlight: bool | list | None = None,
                rank_feature: dict | None = None,
+               query_images: list[bytes] = None,
                ):
         if highlight is None:
             highlight = False
@@ -126,7 +134,17 @@ class Dealer:
 
                 # Build match expressions with optional image vector if model supports multimodal
                 supports_multimodal = getattr(emb_mdl, "supports_multimodal", False)
-                if supports_multimodal:
+                if supports_multimodal and query_images:
+                    # User uploaded images - use image to generate image vector
+                    matchDenseImg = await self.get_image_vector(query_images[0], emb_mdl, topk, req.get("similarity", 0.1))
+                    if not settings.DOC_ENGINE_INFINITY:
+                        src.append(matchDenseImg.vector_column_name)
+                    img_vec_weight = float(req.get("img_vec_weight", 0.25))
+                    text_vec_weight = 0.95 - img_vec_weight
+                    fusionExpr = FusionExpr("weighted_sum", topk, {"weights": f"0.05,{text_vec_weight},{img_vec_weight}"})
+                    matchExprs = [matchText, matchDense, matchDenseImg, fusionExpr]
+                elif supports_multimodal:
+                    # No user image - use text to generate image vector (cross-modal retrieval)
                     matchDenseImg = await self.get_vector(qst, emb_mdl, topk, req.get("similarity", 0.1), vector_column_prefix="img_q")
                     if not settings.DOC_ENGINE_INFINITY:
                         src.append(matchDenseImg.vector_column_name)
@@ -386,6 +404,7 @@ class Dealer:
             rerank_mdl=None,
             highlight=False,
             rank_feature: dict | None = {PAGERANK_FLD: 10},
+            query_images: list[bytes] = None,
     ):
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
         if not question:
@@ -410,7 +429,7 @@ class Dealer:
             tenant_ids = tenant_ids.split(",")
 
         sres = await self.search(req, [index_name(tid) for tid in tenant_ids], kb_ids, embd_mdl, highlight,
-                           rank_feature=rank_feature)
+                           rank_feature=rank_feature, query_images=query_images)
 
         if rerank_mdl and sres.total > 0:
             sim, tsim, vsim = self.rerank_by_model(

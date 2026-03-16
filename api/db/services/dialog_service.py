@@ -316,10 +316,19 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
     questions = [m["content"] for m in messages if m["role"] == "user"][-3:]
     attachments = kwargs["doc_ids"].split(",") if "doc_ids" in kwargs else []
     attachments_= ""
+    query_images = []  # Store image bytes for multimodal retrieval
     if "doc_ids" in messages[-1]:
         attachments = messages[-1]["doc_ids"]
     if "files" in messages[-1]:
         attachments_ = "\n\n".join(FileService.get_files(messages[-1]["files"]))
+        # Extract image bytes for multimodal retrieval
+        for file in messages[-1]["files"]:
+            if file["mime_type"].find("image") >= 0:
+                try:
+                    img_bytes = FileService.get_blob(file["created_by"], file["id"])
+                    query_images.append(img_bytes)
+                except Exception as e:
+                    logging.warning(f"Failed to get image bytes for retrieval: {e}")
 
     prompt_config = dialog.prompt_config
     field_map = KnowledgebaseService.get_field_map(dialog.kb_ids)
@@ -428,6 +437,7 @@ async def async_chat(dialog, messages, stream=True, **kwargs):
                     aggs=True,
                     rerank_mdl=rerank_mdl,
                     rank_feature=label_question(" ".join(questions), kbs),
+                    query_images=query_images,
                 )
                 if prompt_config.get("toc_enhance"):
                     cks = await retriever.retrieval_by_toc(" ".join(questions), kbinfos["chunks"], tenant_ids, chat_mdl, dialog.top_n)
