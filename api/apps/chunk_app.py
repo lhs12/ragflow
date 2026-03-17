@@ -23,6 +23,7 @@ from quart import request
 
 from api.db.services.document_service import DocumentService
 from api.db.services.doc_metadata_service import DocMetadataService
+from api.db.services.file_service import FileService
 from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.llm_service import LLMBundle
 from common.metadata_utils import apply_meta_data_filter
@@ -365,6 +366,16 @@ async def retrieval_test():
     langs = req.get("cross_languages", [])
     user_id = current_user.id
 
+    # Extract image bytes for multimodal retrieval
+    query_images = []
+    for file in req.get("files", []):
+        if file.get("mime_type", "").find("image") >= 0:
+            try:
+                img_bytes = FileService.get_blob(file["created_by"], file["id"])
+                query_images.append(img_bytes)
+            except Exception as e:
+                logging.warning(f"Failed to get image bytes for retrieval: {e}")
+
     async def _retrieval():
         local_doc_ids = list(doc_ids) if doc_ids else []
         tenant_ids = []
@@ -428,7 +439,8 @@ async def retrieval_test():
                         doc_ids=local_doc_ids,
                         top=top,
                         rerank_mdl=rerank_mdl,
-                        rank_feature=labels
+                        rank_feature=labels,
+                        query_images=query_images,
                     )
 
         if use_kg:

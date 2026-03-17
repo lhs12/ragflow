@@ -441,8 +441,11 @@ class Dealer:
                 rank_feature=rank_feature,
             )
         else:
-            if settings.DOC_ENGINE_INFINITY:
-                # Don't need rerank here since Infinity normalizes each way score before fusion.
+            if settings.DOC_ENGINE_INFINITY or query_images:
+                # Don't need rerank here since:
+                # - Infinity normalizes each way score before fusion
+                # - Image search: ES already fused [text, text_vec, img_vec] scores with proper weights,
+                #   text-based reranking would discard image vector similarity
                 sim = [sres.field[id].get("_score", 0.0) for id in sres.ids]
                 sim = [s if s is not None else 0.0 for s in sim]
                 tsim = sim
